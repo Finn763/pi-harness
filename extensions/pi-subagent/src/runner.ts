@@ -249,6 +249,7 @@ export interface InFlightTaskCandidateInspector {
 
 export interface GitRuntime {
 	inspectMain(input: { root: string }, context: OperationContext): Promise<WorkspaceIdentity>;
+	inspectMainBase(input: { root: string }, context: OperationContext): Promise<WorkspaceIdentity>;
 	allocateWorktree(input: {
 		root: string;
 		baseRoot?: string;
@@ -1524,7 +1525,7 @@ export class IsolatedRunner {
 				const ready = readyPendingTasks(state).filter((task) => hasChangesetDependency(state, task.taskId)
 					&& stagedDependencySnapshot(state, task.taskId, action.expectedTip));
 				if (!ready.length) throw new Error("No dependent task is ready on this staged snapshot.");
-				await this.requireExactIntegration(handle, generation, receipts, scope);
+				await this.requireExactIntegration(handle, generation, receipts, scope, true);
 				return await this.run(handle, scope, undefined, action.expectedTip);
 			}
 			if (action.action === "cleanup") {
@@ -1825,7 +1826,7 @@ export class IsolatedRunner {
 	}
 
 	private async requireExactIntegration(handle: RunStateHandle, generation: IntegrationGeneration,
-		receipts: StageReceipt[], scope: RuntimeScope): Promise<void> {
+		receipts: StageReceipt[], scope: RuntimeScope, allowDirtyMain = false): Promise<void> {
 		const root = handle.state.root;
 		const worktree = generation.worktree!;
 		const tip = generation.correction
@@ -1845,7 +1846,8 @@ export class IsolatedRunner {
 			await this.callProductive(handle, scope, (context) => this.integrationGit.inspectWorker(root, worker as WorktreeInfo,
 				stage.source, context.signal));
 		}
-		const main = await this.callProductive(handle, scope, (context) => this.gitRuntime.inspectMain({ root }, context));
+		const main = await this.callProductive(handle, scope, (context) => allowDirtyMain
+			? this.gitRuntime.inspectMainBase({ root }, context) : this.gitRuntime.inspectMain({ root }, context));
 		if (!sameIdentity(main, generation.expectedMain)) throw new Error("Main changed or became dirty before promotion.");
 	}
 
@@ -1944,7 +1946,7 @@ export class IsolatedRunner {
 				}
 				let actualMain: WorkspaceIdentity;
 				try {
-					actualMain = await this.callProductive(handle, scope, async (context) => await this.gitRuntime.inspectMain({ root: state.root }, context));
+					actualMain = await this.callProductive(handle, scope, async (context) => await this.gitRuntime.inspectMainBase({ root: state.root }, context));
 				} catch (error) {
 					this.rethrowStopped(error);
 					const failure = isDeadline(error, scope)
@@ -1961,7 +1963,7 @@ export class IsolatedRunner {
 				}
 				if (stagedSnapshot) {
 					const generation = state.integration.generations.at(-1)!;
-					await this.requireExactIntegration(handle, generation, this.stageReceipts(generation), scope);
+					await this.requireExactIntegration(handle, generation, this.stageReceipts(generation), scope, true);
 				}
 				const wave: WaveState = {
 					number: state.waves.length + 1,
@@ -2206,7 +2208,8 @@ export class IsolatedRunner {
 			if (!wave?.taskIds.includes(task.taskId)) throw new Error("Text task lacks a recorded launch wave.");
 			const baseRoot = wave.base.head === state.main.head ? state.root : state.integration.generations.at(-1)?.worktree?.path;
 			if (!baseRoot) throw new Error("Staged dependency checkout is unavailable.");
-			if (!sameIdentity(await this.gitRuntime.inspectMain({ root: baseRoot }, context), wave.base)) {
+			const inspectBase = baseRoot === state.root ? this.gitRuntime.inspectMainBase.bind(this.gitRuntime) : this.gitRuntime.inspectMain.bind(this.gitRuntime);
+			if (!sameIdentity(await inspectBase({ root: baseRoot }, context), wave.base)) {
 				throw new Error("Staged dependency snapshot drifted before text launch.");
 			}
 			const isolated = await createChildWorktree(
@@ -2214,10 +2217,18 @@ export class IsolatedRunner {
 				`${state.request.id}-${task.taskId}-text-${attempt.number}`,
 				undefined,
 				context.signal,
+				async (worktree) => {
+					if (worktree.baseCommit !== wave.base.head || !sameIdentity(await inspectBase({ root: baseRoot }, context), wave.base)) {
+						throw new Error("Staged dependency snapshot drifted before text worktree creation.");
+					}
+				},
 			);
 			if (!isolated) throw new Error("Explicit isolated text work requires a Git checkout with a committed HEAD; it never falls back to Main.");
 			let result;
 			try {
+				if (!sameIdentity(await inspectBase({ root: baseRoot }, context), wave.base)) {
+					throw new Error("Staged dependency snapshot drifted during text worktree creation.");
+				}
 				const launchHandle = await this.coordinatorRuntime.acquireLaunch(request.role, request.modelClass, context);
 				if (launchHandle.launch.role !== request.role || launchHandle.launch.modelClass !== request.modelClass) {
 					await withTransientLaunch(launchHandle, async () => {
@@ -2248,7 +2259,7 @@ export class IsolatedRunner {
 		if (Buffer.byteLength(output, "utf8") > MAX_PERSISTED_RUNTIME_TEXT_BYTES) {
 			throw new Error(`Text task executor output exceeds ${MAX_PERSISTED_RUNTIME_TEXT_BYTES} UTF-8 bytes.`);
 		}
-		const actualMain = await this.callProductive(handle, scope, async (context) => await this.gitRuntime.inspectMain({ root: state.root }, context));
+		const actualMain = await this.callProductive(handle, scope, async (context) => await this.gitRuntime.inspectMainBase({ root: state.root }, context));
 		if (!sameIdentity(actualMain, state.main)) throw new Error("Main drifted during text task execution.");
 		const wave = state.waves.at(-1)!;
 		if (wave.base.head !== state.main.head) {
@@ -2256,7 +2267,7 @@ export class IsolatedRunner {
 			if (!generation?.worktree || generation.status === "superseded" || !sameIdentity(generation.combinedTip!, wave.base)) {
 				throw new Error("Staged dependency snapshot was superseded during text task execution.");
 			}
-			await this.requireExactIntegration(handle, generation, this.stageReceipts(generation), scope);
+			await this.requireExactIntegration(handle, generation, this.stageReceipts(generation), scope, true);
 		}
 		attempt.status = "completed";
 		attempt.failure = undefined;

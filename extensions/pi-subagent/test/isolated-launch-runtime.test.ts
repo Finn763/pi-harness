@@ -197,7 +197,7 @@ async function harness(
 			resolvedCwds.push(cwd);
 			return resolvedRoot ?? await realpath(root);
 		},
-		inspectMain: async ({ root: inspected }) => {
+		inspectMainBase: async ({ root: inspected }) => {
 			preflightOrder.push("main");
 			inspectedRoots.push(inspected);
 			return { ...MAIN };
