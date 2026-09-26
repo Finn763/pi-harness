@@ -82,7 +82,7 @@ Parallel: { mode: "direct", tasks: [{ role, name, task, ... }] }
 Chain:    { mode: "direct", chain: [{ role, name, task, ... }] }
 ```
 
-Only Roles with known read-only tools and no extensions or MCP servers may run direct. Write-capable Roles and direct `changeset` tasks are rejected; use isolated mode for implementation. Parallel tasks run independently; chains replace each literal `{previous}` with the preceding successful answer and stop on failure.
+Only Roles whose declared base tools are known read-only may run direct. Configured extensions and MCP servers are trusted and may provide additional tools; use isolated mode when a task needs write-capable base tools or a checked changeset. Parallel tasks run independently; chains replace each literal `{previous}` with the preceding successful answer and stop on failure.
 
 The tool returns a task ID and first Herdr tab after launch, not the answer. The extension observes each worker and sends one result to Main when the workflow finishes. If Main is busy, Pi queues it after the current turn; if idle, it starts a turn. A blocked, stalled, unknown, or truncated result is not reported as success. Session switch or shutdown stops observation and preserves tab identities for recovery. Open `/subagent` on the session branch to inspect exact tabs, agents, and Pi session files, including tabs launched after the first. A recorded tab may no longer be running; locally observed work is labelled separately.
 
@@ -213,4 +213,4 @@ Durable state is private under `config/pi-subagent/state/`. Isolated worker Pi s
 
 ## Limits and recovery
 
-Role extensions and MCP servers are trusted executable code, not a sandbox. Select the smallest resource set. Read-only direct Roles cannot write through their declared tools. This is a capability check, not an OS sandbox; external processes and changes to Main's checkout can still make a concurrent read stale. Retained-work reports identify exact resources for deliberate recovery.
+Role extensions and MCP servers are trusted executable code, not a sandbox. Select the smallest resource set. Direct admission checks only declared base tools; extensions and MCP servers can perform writes, including to Main's checkout. Concurrent changes can make a direct worker's read stale. Retained-work reports identify exact resources for deliberate recovery.

@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { PI_SUBAGENT_PROCESS_LEASE, ROLE_TOOL_POLICY_FLAG } from "@henryqw/pi-subagent";
+import { roleCanWrite } from "../extensions/admission.ts";
 import roleTools from "../extensions/role-tools.ts";
 import subagentExtension from "../extensions/subagent.ts";
 
@@ -23,6 +24,15 @@ type Tool = {
 };
 
 type ToolCallHandler = (event: any) => unknown;
+
+test("direct admission trusts configured extensions and MCP servers but rejects write tools", () => {
+	const role = {
+		name: "reader", description: "Read sources", systemPrompt: "Read only.",
+		tools: ["read", "grep"], extensions: ["npm:@example/reader"], skills: [], mcps: ["docs"],
+	};
+	assert.equal(roleCanWrite(role), false);
+	assert.equal(roleCanWrite({ ...role, tools: ["read", "bash"] }), true);
+});
 
 function loadRoleTools(processLease: string | undefined): { events: string[]; toolCall?: ToolCallHandler } {
 	const previousLease = process.env[PI_SUBAGENT_PROCESS_LEASE];

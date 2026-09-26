@@ -62,7 +62,7 @@ Each entry has:
 
 An explicit model must support the route's thinking level. A launched child is never retried automatically after provider or process failure.
 
-Only Roles with known read-only tools and no extensions or MCP servers may run direct. A direct `changeset` or write-capable Role is rejected; use isolated mode for implementation. Parallel reads run concurrently and report in request order. A chain substitutes only the preceding successful output and stops at its first failure.
+Only Roles whose declared base tools are known read-only may run direct. Configured extensions and MCP servers are trusted and may provide additional tools or write to Main's checkout. A direct `changeset` or Role with write-capable base tools is rejected; use isolated mode for implementation. Parallel tasks run concurrently and report in request order. A chain substitutes only the preceding successful output and stops at its first failure.
 
 The tool returns a handle after the first exact Herdr tab is launched. The remaining tabs are launched asynchronously; their identities are recorded on the session branch. A session-owned observer awaits each exact agent's lifecycle and retrieves its final answer from its Pi session file, not its possibly truncated screen. Idle, blocked, unknown, malformed, or oversized answers fail with recoverable tab/session identity; no whole-run deadline is imposed. `/subagent` shows exact recorded tabs on this session branch, distinguishing locally observed work from unobserved records. A session switch stops observation and carries tab identity into the new branch.
 

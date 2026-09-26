@@ -13,7 +13,7 @@ Own Role-configured Pi delegation through one `delegate_task` surface:
 - **Main**: the Pi session and checkout coordinating delegated work.
 - **Role**: package or user Markdown defining responsibility, tools, trusted extension sources, Skills, optional MCP names, instructions, and an optional model-class default. Roles do not select isolation.
 - **Model Class**: `fast`, `balanced`, `frontier`, or `fav`, resolved through `pi-task-models`.
-- **Direct task**: one read-only assignment in a Herdr tab in Main's current workspace.
+- **Direct task**: one task using read-only base tools in a Herdr tab in Main's current workspace; trusted extensions and MCP servers are not read-only constrained.
 - **Isolated request**: one durable ID, goal, and checked task graph.
 - **Candidate**: exact clean committed task-worktree identity produced by an isolated changeset worker.
 - **Readiness**: durable proof that one exact live-worker candidate passed its preliminary checks and is sealed for Main's explicit selection; it is not a separate user approval.
@@ -41,7 +41,7 @@ Own Role-configured Pi delegation through one `delegate_task` surface:
 
 ### Direct evidence
 
-- Direct mode admits only Roles proven read-only from declared tools, extensions, and MCP resources. Direct changesets and write-capable Roles require isolated mode.
+- Direct mode admits Roles with known read-only base tools. Extensions and MCP servers are trusted without a read-only guarantee; direct changesets and Roles with write-capable base tools require isolated mode.
 - Each direct worker has a recorded Herdr tab and Pi session identity. The first handle returns before completion; subsequent tab identities remain recoverable on the session branch.
 - An exact settled worker with a bounded final Pi answer produces a follow-up to Main. Blocked, unknown, idle-stalled, truncated, or ambiguous outcomes retain actionable recovery identity. Session replacement never delivers to the wrong Main session.
 
