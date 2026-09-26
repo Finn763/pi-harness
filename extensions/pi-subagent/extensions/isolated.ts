@@ -76,7 +76,7 @@ export const createIsolatedComponents: CreateIsolatedComponents = ({
 		context,
 		resolveRoot,
 		preflightHost: async ({ root }, operation) => await host.preflightHost({ root }, operation),
-		inspectMain: async (input, operation) => await git.inspectMain(input, operation),
+		inspectMainBase: async (input, operation) => await git.inspectMainBase(input, operation),
 		executionBudget,
 	});
 	return {

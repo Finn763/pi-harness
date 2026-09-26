@@ -50,6 +50,7 @@ Own Role-configured Pi delegation through one `delegate_task` surface:
 - Changeset tasks durably record allocation intent before each external side effect. Unknown outcomes are retained and never guessed.
 - One worker remains live across prompts, preliminary checks, follow-up/correction, readiness, Main's staging decisions, combined validation, and guarded promotion. Selected workers terminate after promotion; rejected workers terminate on explicit rejection.
 - Optional same-worker follow-ups are admitted only while a changeset is actively working. After the final checked-evidence save, one synchronous queue-or-seal transition prevents admitted revisions from being lost; the runner never waits for routine input.
+- Worker waves pin Main's committed branch/HEAD/tree, excluding staged, unstaged, and untracked changes; dirty Main permits checked candidate readiness, but branch/HEAD drift blocks dispatch and clean Main is required before staging, combined validation, or promotion.
 - Preliminary checks gate readiness. Any changed candidate invalidates previous readiness and validation.
 - Optional task judgment binds to the exact preliminary candidate. Main selects and orders candidates in a separate owned integration checkout, where final full-suite checks and optional final judgment bind to the clean combined tip before promotion.
 - Promotion requires exact unchanged clean Main and a passing combined generation. Durable promotion evidence precedes selected-worker termination and cleanup; recovery never rolls back a proven promotion.
