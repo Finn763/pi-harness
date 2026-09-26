@@ -13,7 +13,7 @@ import {
 	type HostProcessOptions,
 	type HostProcessRunner,
 } from "../src/herdr-runtime.ts";
-import type { InFlightTaskCandidateInspection, OperationContext, VerifiedLaunch } from "../src/runner.ts";
+import { buildChangesetTaskPrompt, type InFlightTaskCandidateInspection, type OperationContext, type VerifiedLaunch } from "../src/runner.ts";
 import type {
 	AllocationKind,
 	AgentAllocationIntent,
@@ -360,7 +360,7 @@ const launch: VerifiedLaunch = {
 	model: "provider/model",
 	thinkingLevel: "high",
 	args: [
-		"--model", "provider/model",
+		"--no-session", "--model", "provider/model",
 		"--pi-subagent-role-mcps", "[\"codegraph\"]",
 		"--append-system-prompt", "/private/implementer.prompt",
 	],
@@ -838,7 +838,7 @@ test("allocation uses token-bound non-focused resources, a mode-0600 lease, and 
 				assert.equal(acquired, true);
 				assert.deepEqual(args, [
 					"agent", "start", AGENT_NAME, "--kind", "pi", "--pane", WORKER_PANE_ID, "--",
-					...launch.args,
+					...launch.args.filter((arg) => arg !== "--no-session"), "--session", `${tabDetails.leasePath}.session.jsonl`,
 				]);
 				assert.ok(args.includes("--pi-subagent-role-mcps"));
 				assert.ok(!args.includes("Role prompt must stay private"));
@@ -1796,6 +1796,33 @@ test("normal prompt accepts a changed clean candidate from real in-flight Git in
 	script.done();
 });
 
+test("finished worker without a commit reports blocked instead of waiting for a candidate", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	const delays: number[] = [];
+	const host = runtime(fixture, script, async () => baseIdentity(), {
+		delay: async (milliseconds) => { delays.push(milliseconds); },
+		inspectInFlightTaskCandidate: async () => ({ candidate: baseIdentity(), clean: true, valid: true }),
+	});
+	const { attempt } = await fullAttempt(fixture, host, script);
+	const lease = attempt.allocations.find((item): item is AgentAllocationIntent => item.kind === "agent")!.leasePath;
+	await privateLease(lease);
+	const prompt = buildChangesetTaskPrompt({ goal: GOAL, contexts: [], task, kind: "initial", worktreeCwd: fixture.worktree });
+	await writeFile(`${lease}.session.jsonl`, [
+		JSON.stringify({ type: "message", id: "user-one", parentId: null, message: { role: "user", content: [{ type: "text", text: prompt }] } }),
+		JSON.stringify({ type: "message", id: "answer-one", parentId: "user-one", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "No safe change was made." }] } }),
+	].join("\n") + "\n", { mode: 0o600 });
+	script.push(
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_prompted", agent: agentInfo("working", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
+	);
+	const result = await host.runWorker({ goal: GOAL, contexts: [], task, attempt, workerId: AGENT_NAME, kind: "initial", preCandidate: baseIdentity() }, context());
+	assert.equal(result.outcome, "blocked");
+	assert.deepEqual(delays, []);
+	script.done();
+});
+
 test("delivered prompt remains observable past 30 minutes until real Git evidence becomes changed-clean", async (t) => {
 	const fixture = await paths(t);
 	git(fixture.root, "init", "-q", "-b", "main");
@@ -2272,6 +2299,7 @@ test("cleanup closes only exact saved tab then workspace IDs and reports absent 
 	const { attempt, leasePath } = await fullAttempt(fixture, host, script);
 	attempt.termination = { status: "terminated", workerId: AGENT_NAME, candidate: changedIdentity(), at: 1_000 };
 	await privateLease(leasePath);
+	await writeFile(`${leasePath}.session.jsonl`, "private session\n", { mode: 0o600 });
 
 	script.push(
 		repositoryIdentityStep(fixture),
@@ -2287,6 +2315,7 @@ test("cleanup closes only exact saved tab then workspace IDs and reports absent 
 	);
 	assert.deepEqual(await host.cleanupHost({ requestId: REQUEST_ID, kind: "worker_tab", task, attempt }, context()), { outcome: "completed" });
 	await assert.rejects(stat(leasePath), /ENOENT/);
+	await assert.rejects(stat(`${leasePath}.session.jsonl`), /ENOENT/);
 	await assert.rejects(stat(dirname(leasePath)), /ENOENT/);
 	attempt.cleanup[0]!.status = "completed";
 

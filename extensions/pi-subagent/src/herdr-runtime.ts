@@ -49,6 +49,7 @@ import {
 } from "./runner.ts";
 import { runProcess as defaultRunProcess } from "./process.ts";
 import { EXECUTION_BUDGET_ENV, type EphemeralSubagentExecutionBudget } from "./ephemeral.ts";
+import { exactDirectAnswer } from "./direct-herdr.ts";
 
 const MIN_HERDR_VERSION = [0, 9, 0] as const;
 const MIN_HERDR_PROTOCOL = 22;
@@ -60,6 +61,7 @@ const STALLED_PROMPT_POLL_MS = 250;
 const HOST_LAYOUT_POLL_MS = 50;
 const HOST_LAYOUT_MAX_POLLS = 40;
 const DIAGNOSTIC_LIMIT = 8 * 1024;
+const SESSION_LIMIT = 16 * 1024 * 1024;
 const LEASE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
 const PROCESS_LEASE_ENV = "PI_SUBAGENT_PROCESS_LEASE";
@@ -623,7 +625,7 @@ export class HerdrHostRuntime implements HostRuntime {
 		const prompted = await this.herdr.exec(promptArgs, promptOptions);
 		if (prompted.code !== 0 || prompted.killed) {
 			if (!prompted.killed && !context.signal.aborted && hasHerdrErrorCode(prompted, "agent_prompt_stalled")) {
-				return await this.reconcileDeliveredPrompt(input, allocation, context);
+				return await this.reconcileDeliveredPrompt(input, allocation, context, text);
 			}
 			return {
 				outcome: prompted.killed || context.signal.aborted ? "interrupted" : "unknown",
@@ -636,10 +638,10 @@ export class HerdrHostRuntime implements HostRuntime {
 		} catch (error) {
 			return { outcome: "unknown", diagnostic: `Worker prompt response is malformed: ${safeText(error)}` };
 		}
-		if (settled.status === "working") return await this.reconcileDeliveredPrompt(input, allocation, context);
+		if (settled.status === "working") return await this.reconcileDeliveredPrompt(input, allocation, context, text);
 		if (settled.status === "blocked") return { outcome: "blocked", diagnostic: await this.diagnostic(allocation, context, "Worker settled as blocked.") };
 		if (!SETTLED_AGENT_STATES.has(settled.status)) return { outcome: "unknown", diagnostic: `Worker prompt did not return a settled state: ${settled.status}.` };
-		return await this.candidateResult(input, allocation, context);
+		return await this.candidateResult(input, allocation, context, text);
 	}
 
 	async terminateWorker(
@@ -915,10 +917,14 @@ export class HerdrHostRuntime implements HostRuntime {
 			if (Object.keys(launch.env).some((name) => name !== EXECUTION_BUDGET_ENV || !this.executionBudget)) {
 				throw new Error("Herdr agent launch must not receive caller Role environment variables.");
 			}
+			const args = launch.args.filter((arg) => arg !== "--no-session");
+			if (args.length !== launch.args.length - 1) throw new Error("Role launch must contain exactly one --no-session option.");
+			const sessionFile = this.workerSessionFile(allocation.leasePath, allocation.token);
+			if (await this.sessionFileExists(sessionFile)) throw new Error("Worker session file already exists before agent launch.");
 			const response = await startPiAgent(this.herdr, {
 				name: allocation.agentName,
 				pane: allocation.paneId,
-				args: launch.args,
+				args: [...args, "--session", sessionFile],
 				options,
 				shouldRetry: () => false,
 			});
@@ -942,6 +948,7 @@ export class HerdrHostRuntime implements HostRuntime {
 		input: { task: TaskRequest; attempt: TaskAttempt; preCandidate: WorkspaceIdentity },
 		allocation: AgentAllocationIntent,
 		context: OperationContext,
+		prompt: string,
 		promptMayBeInFlight = true,
 	): Promise<WorkerResult> {
 		for (;;) {
@@ -994,6 +1001,15 @@ export class HerdrHostRuntime implements HostRuntime {
 					diagnostic: await this.diagnostic(allocation, context, "Delivered prompt settled with a candidate."),
 				};
 			}
+			if (SETTLED_AGENT_STATES.has(lifecycle.status)) {
+				try {
+					if (await this.workerTurnFinished(allocation, prompt)) {
+						return { outcome: "blocked", diagnostic: "Worker finished without an exact changed clean committed candidate." };
+					}
+				} catch (error) {
+					return { outcome: "unknown", diagnostic: `Worker session evidence cannot be verified: ${error instanceof SyntaxError ? "malformed JSONL" : safeText(error)}` };
+				}
+			}
 			if (!promptMayBeInFlight && SETTLED_AGENT_STATES.has(lifecycle.status)) {
 				return {
 					outcome: "blocked",
@@ -1016,6 +1032,7 @@ export class HerdrHostRuntime implements HostRuntime {
 		input: { task: TaskRequest; attempt: TaskAttempt; preCandidate: WorkspaceIdentity },
 		allocation: AgentAllocationIntent,
 		context: OperationContext,
+		prompt: string,
 	): Promise<WorkerResult> {
 		let inspection: InFlightTaskCandidateInspection;
 		try {
@@ -1027,7 +1044,7 @@ export class HerdrHostRuntime implements HostRuntime {
 			return { outcome: "unknown", diagnostic: `Settled worker candidate inspection failed: ${safeText(error)}` };
 		}
 		if (!inspection.valid || !inspection.clean || !this.isExpectedCandidate(input, inspection.candidate)) {
-			return await this.reconcileDeliveredPrompt(input, allocation, context, false);
+			return await this.reconcileDeliveredPrompt(input, allocation, context, prompt, false);
 		}
 		return {
 			outcome: "candidate",
@@ -1189,6 +1206,7 @@ export class HerdrHostRuntime implements HostRuntime {
 			throw new Error("Exact process lease appeared during cleanup.");
 		}
 		if (!directoryPresent) return;
+		await this.removeWorkerSessionFile(allocation.leasePath, token);
 		try {
 			await rmdir(dirname(allocation.leasePath));
 		} catch (error) {
@@ -1211,6 +1229,54 @@ export class HerdrHostRuntime implements HostRuntime {
 			}
 		}
 		return true;
+	}
+
+	private workerSessionFile(leasePath: string, token: string): string {
+		this.assertLeasePath(leasePath, token);
+		return `${leasePath}.session.jsonl`;
+	}
+
+	private async sessionFileExists(path: string): Promise<boolean> {
+		try { await lstat(path); return true; }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+			throw error;
+		}
+	}
+
+	private async privateSessionFile(path: string): Promise<string | undefined> {
+		let file;
+		try { file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		}
+		try {
+			const info = await file.stat();
+			const uid = process.getuid?.();
+			if (!info.isFile() || (info.mode & 0o077) !== 0 || (uid !== undefined && info.uid !== uid)
+				|| info.size > SESSION_LIMIT) throw new Error("Worker session file is not private, regular, or bounded.");
+			return await file.readFile({ encoding: "utf8" });
+		} finally { await file.close(); }
+	}
+
+	private async workerTurnFinished(allocation: AgentAllocationIntent, prompt: string): Promise<boolean> {
+		const path = this.workerSessionFile(allocation.leasePath, allocation.token);
+		if (!await this.sessionFileExists(path)) return false;
+		await this.assertPrivateLeaseDirectories(allocation.leasePath, false);
+		const session = await this.privateSessionFile(path);
+		if (session === undefined) return false;
+		try { exactDirectAnswer(session, prompt, SESSION_LIMIT); return true; }
+		catch (error) {
+			if (error instanceof Error && error.message === "Pi did not persist an exact successful final answer for this prompt.") return false;
+			if (error instanceof SyntaxError && !session.endsWith("\n")) return false; // Pi may still be writing the last JSONL entry.
+			throw error;
+		}
+	}
+
+	private async removeWorkerSessionFile(leasePath: string, token: string): Promise<void> {
+		const path = this.workerSessionFile(leasePath, token);
+		if (await this.privateSessionFile(path) !== undefined) await unlink(path);
 	}
 
 	private assertLeasePath(path: string, token: string): void {

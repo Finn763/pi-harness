@@ -505,6 +505,7 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 		activeJobs.add(controller);
 		jobOwners.set(key, canDeliver);
 		const notified = new Set<string>();
+		const attentionNotified = new Set<string>();
 		let candidateListener: ((state: RunState) => void) | undefined;
 		const finish = () => {
 			activeJobs.delete(controller);
@@ -552,6 +553,15 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 		candidateListener = (state) => {
 			if (state.root !== root || state.request.id !== id || state.status !== "running" || !canDeliver()) return;
 			latestState = state;
+			for (const task of state.tasks) {
+				if (task.status !== "needs_attention") {
+					attentionNotified.delete(task.taskId);
+					continue;
+				}
+				if (attentionNotified.has(task.taskId)) continue;
+				attentionNotified.add(task.taskId);
+				deliver(`Pi Subagent ${id}: ${task.taskId} needs attention. Inspect subagent_status for the saved worker evidence; do not replay an uncertain prompt.`);
+			}
 			for (const candidate of state.integration.candidates) {
 				const identity = `${candidate.taskId}\0${candidate.attempt}\0${candidate.tip.head}`;
 				if (candidate.decision || notified.has(identity)) continue;

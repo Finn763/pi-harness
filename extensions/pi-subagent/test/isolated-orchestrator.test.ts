@@ -843,6 +843,44 @@ test("a ready worker sends Main a stageable follow-up before the wave finishes",
 	await new Promise(setImmediate);
 });
 
+test("worker attention notifies Main once while a sibling is still running", async () => {
+	const done = deferred<RunResponse>();
+	let save!: (state: RunState) => void;
+	const harness = createHarness({
+		onCreate(options) { save = options.onStateSaved; },
+		runner: { async execute() {
+			const pending = structuredClone(PRIVATE_STATE);
+			pending.status = "pending";
+			pending.updatedAt = pending.createdAt;
+			pending.tasks[0]!.status = "pending";
+			pending.tasks[0]!.attempts = [];
+			save(pending);
+			return await done.promise;
+		} } as never,
+	});
+	const ctx = { ...context(CANONICAL_ROOT), sessionManager: { getSessionId: () => "origin" } } as ExtensionContext;
+	harness.handlers.get("session_start")!({}, ctx);
+	await executeTool(namedTool(harness, "delegate_task"), EXECUTE_REQUEST, undefined, ctx);
+	const state = structuredClone(PRIVATE_STATE);
+	state.status = "running";
+	state.request.tasks.push({ ...state.request.tasks[0]!, id: "unit-two" });
+	const first = state.tasks[0]!;
+	if (first.kind !== "changeset") throw new Error("Expected a changeset task.");
+	state.tasks.push({ ...structuredClone(first), taskId: "unit-two", status: "working", failure: undefined });
+	save(state);
+	save(state);
+	assert.equal(harness.sent.length, 1);
+	assert.match(harness.sent[0]!.message.content, /unit-one needs attention.*subagent_status/);
+	assert.deepEqual(harness.sent[0]!.options, { triggerTurn: true, deliverAs: "followUp" });
+	state.tasks[0]!.status = "working";
+	save(state);
+	state.tasks[0]!.status = "needs_attention";
+	save(state);
+	assert.equal(harness.sent.length, 2);
+	done.resolve(response("execute", true, state));
+	await new Promise(setImmediate);
+});
+
 test("advance acknowledges a dependent wave before its workers finish", async () => {
 	const done = deferred<RunResponse>();
 	let save!: (state: RunState) => void;
@@ -851,6 +889,7 @@ test("advance acknowledges a dependent wave before its workers finish", async ()
 		runner: { async integrate() {
 			const running = structuredClone(PRIVATE_STATE);
 			running.status = "running";
+			running.tasks[0]!.status = "working";
 			running.waves = [{ number: 1, base: RECORDED_MAIN, taskIds: ["unit-one"], status: "dispatching" }];
 			save(running);
 			return await done.promise;
