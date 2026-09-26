@@ -833,9 +833,9 @@ export class IsolatedRunner {
 		this.currentPolicy = currentPolicy;
 	}
 
-	async listRequests(root: string): Promise<{ requests: Array<{ id: string; name: string; status: string; tasks: Array<{ id: string; name: string; status: string; kind: string }> }>; invalidIds: string[] }> {
-		const { states, invalidIds } = await this.store.list(root);
-		return { invalidIds, requests: states.map(({ state }) => ({
+	async listRequests(root: string): Promise<{ requests: Array<{ id: string; name: string; status: string; tasks: Array<{ id: string; name: string; status: string; kind: string }> }>; invalidIds: string[]; states: RunState[] }> {
+		const { states: entries, invalidIds } = await this.store.list(root);
+		return { invalidIds, states: entries.map(({ state }) => state), requests: entries.map(({ state }) => ({
 			id: state.request.id, name: state.request.goal,
 			status: state.status === "completed" && (state.tasks.some((task) => task.kind === "changeset" && task.attempts.some((attempt) => attempt.cleanup.some((step) => step.status !== "completed")))
 				|| state.integration.generations.some((generation) => generation.cleanup?.some((step) => step.status !== "completed")

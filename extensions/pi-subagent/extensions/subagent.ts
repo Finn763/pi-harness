@@ -210,7 +210,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			}
 			return [...grouped.values()];
 		},
-		isolated: (cwd) => isolatedSurface.inventory(cwd),
+		isolated: isolatedSurface.inventory,
 		recover: (cwd) => isolatedSurface.recover(cwd),
 		async inspectInTab(root, id, ctx, current) {
 			const notices = await isolatedSurface.inspect(root, id);

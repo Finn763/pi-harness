@@ -142,11 +142,7 @@ export function workspaceWidgetLines(state: RunState): string[] | undefined {
 		: rows;
 }
 
-function updateWorkspaceWidget(ctx: ExtensionContext, state: RunState, rowsByRequest: Map<string, string[]>): void {
-	const key = `${state.root}\0${state.request.id}`;
-	const rows = workspaceWidgetLines(state);
-	if (rows) rowsByRequest.set(key, rows);
-	else rowsByRequest.delete(key);
+function renderWorkspaceWidget(ctx: ExtensionContext, rowsByRequest: Map<string, string[]>): void {
 	if (!ctx.hasUI) return;
 	const rowOrder = (row: string) => row.endsWith(" · request aborted") ? -1
 		: row.startsWith("!") ? 0 : row.startsWith("◌") ? 1 : 2;
@@ -168,7 +164,11 @@ function updateWorkspaceWidget(ctx: ExtensionContext, state: RunState, rowsByReq
 
 function updateWorkspaceWidgetSafely(ctx: ExtensionContext, state: RunState, rowsByRequest: Map<string, string[]>): void {
 	try {
-		updateWorkspaceWidget(ctx, state, rowsByRequest);
+		const key = `${state.root}\0${state.request.id}`;
+		const rows = workspaceWidgetLines(state);
+		if (rows) rowsByRequest.set(key, rows);
+		else rowsByRequest.delete(key);
+		renderWorkspaceWidget(ctx, rowsByRequest);
 	} catch (error) {
 		console.error("Pi Subagent workspace widget update failed.", error);
 	}
@@ -404,7 +404,7 @@ function toolResult(response: RunResponse, ctx: ExtensionContext, rowsByRequest:
 
 export interface IsolatedSurface {
 	execute(params: unknown, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<ReturnType<typeof toolResult>>;
-	inventory(cwd: string): Promise<IsolatedInventory>;
+	inventory(cwd: string, current?: () => boolean): Promise<IsolatedInventory>;
 	recover(cwd: string): Promise<string>;
 	inspect(root: string, requestId: string): Promise<readonly string[]>;
 	canFollowup(root: string, requestId: string, taskId: string): boolean;
@@ -429,6 +429,7 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 	let latestCtx: ExtensionContext | undefined;
 	let components: IsolatedExtensionComponents | undefined;
 	const workspaceRowsByRequest = new Map<string, string[]>();
+	let savedRevision = 0;
 	const stateListeners = new Set<(state: RunState) => void>();
 	const activeJobs = new Set<AbortController>();
 	const jobOwners = new Map<string, () => boolean>();
@@ -446,6 +447,7 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 		policy: options.policy,
 		currentPolicy: options.currentPolicy,
 		onStateSaved: (state) => {
+			savedRevision += 1;
 			for (const listener of stateListeners) listener(state);
 			const owner = jobOwners.get(`${state.root}\0${state.request.id}`);
 			if (!sessionClosed && (owner === undefined || owner())) {
@@ -667,9 +669,20 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 		},
 	});
 	return {
-		async inventory(cwd) {
+		async inventory(cwd, current) {
 			const root = await lookupRoot(cwd);
-			return { root, ...await getComponents().runner.listRequests(root) };
+			const revision = savedRevision;
+			const { requests, invalidIds, states } = await getComponents().runner.listRequests(root);
+			if (current?.() && !sessionClosed && revision === savedRevision) {
+				workspaceRowsByRequest.clear();
+				for (const state of states) {
+					const rows = workspaceWidgetLines(state);
+					if (rows) workspaceRowsByRequest.set(`${state.root}\0${state.request.id}`, rows);
+				}
+				try { renderWorkspaceWidget(latestContext(), workspaceRowsByRequest); }
+				catch (error) { console.error("Pi Subagent workspace widget update failed.", error); }
+			}
+			return { root, requests, invalidIds };
 		},
 		async recover(cwd) {
 			const root = await lookupRoot(cwd);

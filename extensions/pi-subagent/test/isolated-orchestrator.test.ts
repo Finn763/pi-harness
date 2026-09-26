@@ -195,6 +195,7 @@ function createHarness(options: {
 	runner?: IsolatedExtensionComponents["runner"];
 	resolveRoot?: IsolatedExtensionComponents["resolveRoot"];
 	responseState?: RunState;
+	inventoryStates?: RunState[];
 	onCreate?: (options: Parameters<CreateIsolatedComponents>[0]) => void;
 } = {}): Harness {
 	const tools: RegisteredTool[] = [];
@@ -260,7 +261,7 @@ function createHarness(options: {
 		},
 		listRequests(...args: unknown[]) {
 			runnerCalls.push({ method: "listRequests", args });
-			return { requests: [{ id: "request-one", name: "Goal", status: "working", tasks: [{ id: "unit-one", name: "Task", kind: "changeset", status: "working" }] }], invalidIds: ["damaged"] };
+			return { requests: [{ id: "request-one", name: "Goal", status: "working", tasks: [{ id: "unit-one", name: "Task", kind: "changeset", status: "working" }] }], invalidIds: ["damaged"], states: options.inventoryStates ?? [] };
 		},
 		canFollowup(...args: unknown[]) {
 			runnerCalls.push({ method: "canFollowup", args });
@@ -551,6 +552,27 @@ test("isolated widget caps rows and keeps attention visible", async () => {
 	assert.equal(widgets.at(-1)?.length, 6);
 	assert.match(widgets.at(-1)![0]!, /^! I /);
 	assert.equal(widgets.at(-1)![5], "+2 more · /subagent");
+});
+
+test("inventory refresh restores and clears workspace widget rows from saved state", async () => {
+	const state = structuredClone(PRIVATE_STATE);
+	addWorkspace(state);
+	const states = [state];
+	const widgets: Array<string[] | undefined> = [];
+	const ctx = { cwd: "/repo", hasUI: true,
+		ui: { setWidget: (_key: string, content: WidgetContent) => widgets.push(renderWidget(content)) } } as unknown as ExtensionContext;
+	const harness = createHarness({ inventoryStates: states });
+	harness.handlers.get("session_start")!({}, ctx);
+	assert.equal(widgets.at(-1), undefined);
+	const inventory = await harness.surface.inventory("/repo", () => true);
+	assert.deepEqual(inventory.requests.map(({ id }) => id), ["request-one"]);
+	assert.deepEqual(widgets.at(-1), workspaceWidgetLines(state));
+	states.length = 0;
+	await harness.surface.inventory("/repo", () => true);
+	assert.equal(widgets.at(-1), undefined);
+	states.push(state);
+	await harness.surface.inventory("/repo", () => false);
+	assert.equal(widgets.at(-1), undefined);
 });
 
 test("saved state updates and clears the workspace widget", async () => {
