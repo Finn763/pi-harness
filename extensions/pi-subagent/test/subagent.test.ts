@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { PI_SUBAGENT_PROCESS_LEASE, ROLE_TOOL_POLICY_FLAG } from "@henryqw/pi-subagent";
+import { roleCanWrite, roleIsReadOnlyScout } from "../extensions/admission.ts";
 import roleTools from "../extensions/role-tools.ts";
 import subagentExtension from "../extensions/subagent.ts";
 
@@ -24,8 +25,22 @@ type Tool = {
 
 type ToolCallHandler = (event: any) => unknown;
 
-function loadRoleTools(processLease: string | undefined): { events: string[]; toolCall?: ToolCallHandler } {
+test("direct admission trusts configured extensions and MCP servers but rejects write tools", () => {
+	const role = {
+		name: "reader", description: "Read sources", systemPrompt: "Read only.",
+		tools: ["read", "grep"], extensions: ["npm:@example/reader"], skills: [], mcps: ["docs"],
+	};
+	assert.equal(roleCanWrite(role), false);
+	assert.equal(roleCanWrite({ ...role, tools: ["read", "bash"] }), true);
+	assert.equal(roleIsReadOnlyScout({ ...role, extensions: [], mcps: [] }), true);
+	assert.equal(roleIsReadOnlyScout({ ...role, extensions: [], mcps: ["docs"] }), false);
+	assert.equal(roleIsReadOnlyScout({ ...role, mcps: [] }), false);
+	assert.equal(roleIsReadOnlyScout({ ...role, extensions: [], mcps: [], tools: ["bash"] }), false);
+});
+
+function loadRoleTools(processLease: string | undefined): { events: string[]; toolCall?: ToolCallHandler; childUmask: number } {
 	const previousLease = process.env[PI_SUBAGENT_PROCESS_LEASE];
+	const previousUmask = process.umask();
 	if (processLease === undefined) delete process.env[PI_SUBAGENT_PROCESS_LEASE];
 	else process.env[PI_SUBAGENT_PROCESS_LEASE] = processLease;
 	const events: string[] = [];
@@ -39,8 +54,9 @@ function loadRoleTools(processLease: string | undefined): { events: string[]; to
 				if (event === "tool_call") toolCall = handler;
 			},
 		} as unknown as ExtensionAPI);
-		return { events, toolCall };
+		return { events, toolCall, childUmask: process.umask() };
 	} finally {
+		process.umask(previousUmask);
 		if (previousLease === undefined) delete process.env[PI_SUBAGENT_PROCESS_LEASE];
 		else process.env[PI_SUBAGENT_PROCESS_LEASE] = previousLease;
 	}
@@ -70,7 +86,12 @@ for (const entry of readdirSync("/dev/fd")) {
 }
 throw new Error("process lease descriptor was not inherited");
 `);
-	const extension = loadRoleTools(lease);
+	const parentUmask = process.umask(0o022);
+	let extension: ReturnType<typeof loadRoleTools>;
+	try {
+		extension = loadRoleTools(lease);
+		assert.equal(extension.childUmask, 0o022, "worker tools must preserve ordinary file creation permissions");
+	} finally { process.umask(parentUmask); }
 	assert.equal(extension.events.filter((event) => event === "tool_call").length, 1);
 	assert.ok(extension.toolCall);
 	const bash = {

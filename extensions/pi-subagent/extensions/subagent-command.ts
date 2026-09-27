@@ -30,7 +30,7 @@ export interface IsolatedInventory {
  * validation and queue operation. They must not await between those operations. */
 export interface SubagentCommandAdapter {
 	direct(ctx: ExtensionContext): readonly DirectTask[];
-	isolated(cwd: string): Promise<IsolatedInventory>;
+	isolated(cwd: string, current: () => boolean): Promise<IsolatedInventory>;
 	recover(cwd: string): Promise<string>;
 	inspectInTab(root: string, requestId: string, ctx: ExtensionContext, current: () => boolean): Promise<{ tabId: string; name: string; sessionFile: string }>;
 	canFollowup(root: string, requestId: string, taskId: string): boolean;
@@ -94,7 +94,7 @@ export function registerSubagentCommand(pi: ExtensionAPI, adapter: SubagentComma
 				const direct = adapter.direct(ctx);
 				let inventory: IsolatedInventory | undefined;
 				let unavailable: string | undefined;
-				try { inventory = await adapter.isolated(ctx.cwd); }
+				try { inventory = await adapter.isolated(ctx.cwd, current); }
 				catch (error) { unavailable = errorText(error); }
 				if (!valid()) return;
 				if (unavailable) ctx.ui.notify(`Isolated inventory unavailable (${unavailable}). Direct branch recovery remains available; check the canonical Git checkout/configuration.`, "warning");

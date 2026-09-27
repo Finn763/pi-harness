@@ -589,8 +589,10 @@ function carryLedger(before: FeedbackSnapshot, after: FeedbackSnapshot, ledger: 
 		if (old && decision && old.kind === entry.kind) {
 			if (entry.kind !== "thread" && isDeepStrictEqual(old.node, entry.node)) return decision;
 			if (entry.kind === "thread") {
-				const { comments: _a, isResolved: _b, ...previous } = old.node as FeedbackSnapshot["reviewThreads"][number];
-				const { comments: _c, isResolved: _d, ...current } = entry.node as FeedbackSnapshot["reviewThreads"][number];
+				// A fixing push can move or obsolete the current anchor without changing the review.
+				// Original anchors remain identity; child comment content is checked separately.
+				const { comments: _a, isResolved: _b, isOutdated: _c, line: _d, startLine: _e, ...previous } = old.node as FeedbackSnapshot["reviewThreads"][number];
+				const { comments: _f, isResolved: _g, isOutdated: _h, line: _i, startLine: _j, ...current } = entry.node as FeedbackSnapshot["reviewThreads"][number];
 				if (isDeepStrictEqual(previous, current)) return decision;
 			}
 		}
@@ -671,10 +673,25 @@ export class PullRequestCommentSweep {
 		const location = await this.location();
 		const state = await this.loadIfPresent(location);
 		if (!state) return "start";
-		if (!recoveryMatchesRouteAuthority(state, this.suppliedAuthority)) {
+		if (!recoveryMatchesRouteAuthority(state, this.suppliedAuthority) && !await this.isScopedExternalPublication(state)) {
 			throw new Error(`Comment sweep recovery is preserved at ${location.path}: recovery does not match freshly discovered route authority`);
 		}
 		return "resume";
+	}
+
+	/** Observe a scoped publication without claiming or replaying any external mutation. */
+	private async isScopedExternalPublication(state: SweepState): Promise<boolean> {
+		const authority = this.suppliedAuthority;
+		if (!authority || state.phase !== "recorded" || !state.ledger || !state.approved
+			|| state.publicationHead !== null || state.attempts.push.state !== "none"
+			|| state.attempts.commit && state.attempts.commit.state !== "applied"
+			|| state.attempts.resolutions.length || state.attempts.finalize.state !== "none"
+			|| authority.head.oid === state.original.head
+			|| !sameLinkage(state.authority, authority, authority.head.oid, true)) return false;
+		await this.currentAuthority(state.authority, authority.head.oid, true);
+		await this.requireCleanPublication(state, authority.head.oid);
+		await this.currentAuthority(state.authority, authority.head.oid, true);
+		return true;
 	}
 
 	private async loadState(location: Awaited<ReturnType<PullRequestCommentSweep["location"]>>): Promise<SweepState> {
@@ -916,7 +933,12 @@ export class PullRequestCommentSweep {
 			const location = await this.location();
 			const state = await this.loadState(location);
 			if (!recoveryMatchesRouteAuthority(state, this.suppliedAuthority)) {
-				throw new Error(`Comment sweep recovery is preserved at ${location.path}: recovery does not match supplied route authority`);
+				if (!await this.isScopedExternalPublication(state)) {
+					throw new Error(`Comment sweep recovery is preserved at ${location.path}: recovery does not match supplied route authority`);
+				}
+				state.publicationHead = this.suppliedAuthority.head.oid;
+				state.attempts.push = { state: "applied", head: state.publicationHead };
+				state.phase = "published";
 			}
 			if (state.version === 1 && state.projection && state.ledger) {
 				// Version-one projections could resolve a parent despite a blocked child.
@@ -1177,7 +1199,7 @@ export class PullRequestCommentSweep {
 			const replyBodies = new Map(threadIds.filter((threadId) => !hasReply(threadId)).map((threadId) => {
 				const entry = ledger.get(threadId)!;
 				return [threadId, entry.disposition === "addressed"
-					? `${new URL(state.authority.url).origin}/${state.authority.base.repository}/commit/${state.publicationHead}`
+					? state.publicationHead!
 					: entry.note.trim()] as const;
 			}));
 			const reserveBytes = [...replyBodies.values()].reduce((total, body) =>

@@ -7,7 +7,11 @@ const READ_ONLY_TOOLS = new Set([
 ]);
 
 export function roleCanWrite(role: Role): boolean {
-	return Boolean(role.extensions.length || role.mcps?.length || role.tools.some((tool) => !READ_ONLY_TOOLS.has(tool)));
+	return role.tools.some((tool) => !READ_ONLY_TOOLS.has(tool));
+}
+
+export function roleIsReadOnlyScout(role: Role): boolean {
+	return !roleCanWrite(role) && role.extensions.length === 0 && !role.mcps?.length;
 }
 
 export interface CheckoutAdmission {
