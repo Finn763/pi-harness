@@ -15,9 +15,10 @@ import {
 import type { ExecuteRequest, RunState, TaskState, TextTaskState, WorkspaceIdentity } from "../src/schema.ts";
 import { FileRunStore } from "../src/store.ts";
 
-function mainIdentity(): WorkspaceIdentity {
-	const oid = "a".repeat(40);
-	return { branch: "refs/heads/main", head: oid, index: oid, tree: oid };
+function mainIdentity(root: string): WorkspaceIdentity {
+	const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+	const tree = git("rev-parse", "HEAD^{tree}");
+	return { branch: git("symbolic-ref", "HEAD"), head: git("rev-parse", "HEAD"), index: tree, tree };
 }
 
 async function initializeRepository(root: string): Promise<void> {
@@ -133,12 +134,13 @@ test("text dispatch failure persists its failed running attempt", async (t) => {
 		{
 			now: () => 1,
 			randomToken: () => "token-0000000000000001",
-			preflight: async (input: { cwd: string }) => ({ root: input.cwd, main: mainIdentity() }),
+			preflight: async (input: { cwd: string }) => ({ root: input.cwd, main: mainIdentity(root) }),
 			acquireLaunch: acquireTextLaunch,
 		} as unknown as CoordinatorRuntime,
 		{} as HostRuntime,
 		{
-			inspectMain: async () => mainIdentity(),
+			inspectMain: async () => mainIdentity(root),
+			inspectMainBase: async () => mainIdentity(root),
 		} as unknown as GitRuntime & TaskCandidateInspector,
 		store,
 		unavailableTextExecutor,
@@ -214,15 +216,16 @@ test("text retry saves its second attempt atomically before executor launch", as
 		{
 			now: () => 1,
 			randomToken: () => "token-0000000000000001",
-			preflight: async (input: { cwd: string }) => ({ root: input.cwd, main: mainIdentity() }),
+			preflight: async (input: { cwd: string }) => ({ root: input.cwd, main: mainIdentity(root) }),
 			acquireLaunch: acquireTextLaunch,
 		} as unknown as CoordinatorRuntime,
 		{} as HostRuntime,
 		{
-			inspectMain: async () => mainIdentity(),
+			inspectMain: async () => mainIdentity(root),
+			inspectMainBase: async () => mainIdentity(root),
 			runChecks: async () => ({
 				results: [{ command: "true", args: [], code: 0, killed: false, stdout: "", stderr: "" }],
-				identityAfter: mainIdentity(),
+				identityAfter: mainIdentity(root),
 			}),
 		} as unknown as GitRuntime & TaskCandidateInspector,
 		store,
@@ -245,7 +248,7 @@ test("text retry saves its second attempt atomically before executor launch", as
 	assert.equal(firstProductiveSave.status, "running");
 	assert.deepEqual(firstProductiveSave.waves.at(-1), {
 		number: 2,
-		base: mainIdentity(),
+		base: mainIdentity(root),
 		taskIds: ["research"],
 		status: "dispatching",
 	});
@@ -324,12 +327,13 @@ test("text retry runs only the selected ready task while another needs attention
 		{
 			now: () => 1,
 			randomToken: () => "token-0000000000000001",
-			preflight: async (input: { cwd: string }) => ({ root: input.cwd, main: mainIdentity() }),
+			preflight: async (input: { cwd: string }) => ({ root: input.cwd, main: mainIdentity(root) }),
 			acquireLaunch: acquireTextLaunch,
 		} as unknown as CoordinatorRuntime,
 		{} as HostRuntime,
 		{
-			inspectMain: async () => mainIdentity(),
+			inspectMain: async () => mainIdentity(root),
+			inspectMainBase: async () => mainIdentity(root),
 		} as unknown as GitRuntime & TaskCandidateInspector,
 		store,
 		executor,
@@ -374,7 +378,7 @@ test("text retry runs only the selected ready task while another needs attention
 	assert.equal(persistedSelected.status, "running");
 	assert.deepEqual(persistedSelectedRetry.waves.at(-1), {
 		number: 2,
-		base: mainIdentity(),
+		base: mainIdentity(root),
 		taskIds: [selectedId],
 		status: "dispatching",
 	});
@@ -412,12 +416,13 @@ test("mixed waves settle and attribute dispatch failures in either task order", 
 				{
 					now: () => 1,
 					randomToken: () => "token-0000000000000001",
-					preflight: async (input: { cwd: string }) => ({ root: input.cwd, main: mainIdentity() }),
+					preflight: async (input: { cwd: string }) => ({ root: input.cwd, main: mainIdentity(root) }),
 					acquireLaunch: acquireTextLaunch,
 				} as unknown as CoordinatorRuntime,
 				{} as HostRuntime,
 				{
-					inspectMain: async () => mainIdentity(),
+					inspectMain: async () => mainIdentity(root),
+					inspectMainBase: async () => mainIdentity(root),
 				} as unknown as GitRuntime & TaskCandidateInspector,
 				store,
 				unavailableTextExecutor,

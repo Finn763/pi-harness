@@ -40,6 +40,7 @@ import {
 } from "../src/schema.ts";
 import { FileRunStore, type RunStateHandle } from "../src/store.ts";
 import { IntegrationGit, type StageReceipt, type GitOutcome } from "../src/integration-git.ts";
+import { CheckedGitRuntime } from "../src/git-runtime.ts";
 import type { WorktreeInfo } from "../src/worktree.ts";
 
 const oid = (character: string): string => character.repeat(40);
@@ -68,6 +69,7 @@ type WorkerContextCall = {
 class FakeRuntime implements CoordinatorRuntime, HostRuntime, GitRuntime, TaskCandidateInspector {
 	clock = 1_000;
 	main = identity("a");
+	mainDirty = false;
 	integrationIdentity?: WorkspaceIdentity;
 	integrationPath?: string;
 	workerBarrierSize = 0;
@@ -155,7 +157,12 @@ class FakeRuntime implements CoordinatorRuntime, HostRuntime, GitRuntime, TaskCa
 		}
 		const failure = this.inspectMainFailures.shift();
 		if (failure) throw failure;
+		if (this.mainDirty) throw new Error("Git workspace is not clean.");
 		return { ...this.main };
+	}
+
+	async inspectMainBase(input: Parameters<GitRuntime["inspectMainBase"]>[0], context: OperationContext): Promise<WorkspaceIdentity> {
+		return this.mainDirty ? { ...this.main } : await this.inspectMain(input, context);
 	}
 
 	async inspectTaskCandidate(
@@ -1071,6 +1078,7 @@ test("text producers feed ordered synthesis context into an integrated changeset
 		},
 	};
 	const { root, runtime, runner } = await harness(t, { executor });
+	runtime.main = await new CheckedGitRuntime().inspectMain({ root }, { signal: new AbortController().signal });
 	const definition = request("text-dataflow", [
 		textTask("source-one", "role/source-one"),
 		textTask("source-two", "role/source-two"),
@@ -1552,6 +1560,7 @@ test("text dispatch uses the injected executor and persists a valid running inte
 		executor,
 		createStore: (agentDir) => (store = new RecordingStore(agentDir)),
 	});
+	runtime.main = await new CheckedGitRuntime().inspectMain({ root }, { signal: new AbortController().signal });
 	const definition = request("text-success", [textTask("research", "researcher/brief")]);
 
 	const result = await runner.execute(definition, root);
@@ -1632,6 +1641,7 @@ test("an interrupted text task remains failed until its explicit retry", async (
 		},
 	};
 	const { root, runtime, runner } = await harness(t, { executor });
+	runtime.main = await new CheckedGitRuntime().inspectMain({ root }, { signal: new AbortController().signal });
 	const definition = request("text-retry", [textTask("research")]);
 
 	const stopped = await runner.execute(definition, root);
@@ -1739,6 +1749,31 @@ class StagingGit extends IntegrationGit {
 		} };
 	}
 }
+
+test("dirty Main retains a checked candidate until exact clean Main allows staging and promotion", async (t) => {
+	const git = new StagingGit();
+	const { root, runtime, runner } = await harness(t, { integrationGit: git });
+	runtime.mainDirty = true;
+	const definition = request("dirty-admission", [changesetTask("change")]);
+	const ready = await runner.execute(definition, root);
+	assert.equal(ready.state.integration.candidates.length, 1);
+	assert.equal(ready.state.integration.generations.length, 0);
+	const candidate = ready.state.integration.candidates[0]!;
+	const action = { id: definition.id, action: "stage" as const, generation: 1,
+		taskId: candidate.taskId, attempt: candidate.attempt, candidate: candidate.tip, expectedTip: ready.state.main };
+	await assert.rejects(runner.stage(action, root), /not clean|Main changed or became dirty/);
+	assert.equal((await runner.status(definition.id, root)).state.integration.candidates.length, 1);
+	assert.equal(git.merged.length, 0);
+	runtime.mainDirty = false;
+	const staged = await runner.stage(action, root);
+	assert.equal(staged.state.integration.generations[0]?.stages[0]?.status, "staged");
+	const tip = staged.state.integration.generations[0]!.combinedTip!;
+	git.promoteMain = (main) => { runtime.main = main; };
+	const validated = await runner.integrate({ id: definition.id, action: "validate", generation: 1, expectedTip: tip }, root);
+	assert.equal(validated.state.integration.generations[0]?.status, "ready");
+	const completed = await runner.integrate({ id: definition.id, action: "promote", generation: 1, expectedTip: tip }, root);
+	assert.equal(completed.state.status, "completed");
+});
 
 test("Main can stage a checked worker while its sibling is still working", async (t) => {
 	const git = new StagingGit();
@@ -1907,7 +1942,7 @@ test("revision supersedes transitive text and changeset work; explicit advance r
 			output: await (await import("node:fs/promises")).readFile(join(prepared.cwd, "README.md"), "utf8") };
 	} };
 	const { runner, root, runtime } = await harness(t, { integrationGit: git, executor });
-	const checked = new (await import("../src/git-runtime.ts")).CheckedGitRuntime();
+	const checked = new CheckedGitRuntime();
 	runtime.main = await checked.inspectMain({ root }, { signal: new AbortController().signal });
 	const id = "staged-text-dependent";
 	const ready = await runner.execute(request(id, [{ ...changesetTask("second"), contextFrom: ["report"] },
@@ -1918,8 +1953,11 @@ test("revision supersedes transitive text and changeset work; explicit advance r
 	const tip = staged.state.integration.generations[0]!.combinedTip!;
 	runtime.integrationIdentity = tip;
 	runtime.integrationPath = staged.state.integration.generations[0]!.worktree!.path;
+	runtime.mainDirty = true;
 	const result = await runner.integrate({ id, generation: 1, action: "advance", expectedTip: tip }, root);
 	assert.equal(textState(result.state, "report").attempts[0]?.output?.text, "staged content 1", JSON.stringify(textState(result.state, "report")));
+	assert.ok(result.state.integration.candidates.some((candidate) => candidate.taskId === "second"));
+	runtime.mainDirty = false;
 	const oldDependent = result.state.integration.candidates.find((candidate) => candidate.taskId === "second")!;
 	const revised = await runner.stage({ id, action: "revise", generation: 1, taskId: "first", attempt: first.attempt,
 		candidate: first.tip, expectedTip: tip, instruction: "Change predecessor." }, root);

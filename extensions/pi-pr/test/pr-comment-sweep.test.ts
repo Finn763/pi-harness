@@ -123,7 +123,7 @@ type Fixture = {
 	bare: string;
 	agentDir: string;
 	initial: string;
-	world: { resolved: boolean; body: string; baseOid: string; baseDriftOnRead: string | null; extraBody: string | null; replyBody: string | null; lateThreadComment: string | null; emptyReviewOnReply: boolean; concurrentBodyOnReply: string | null; failFeedbackAfterReply: boolean; replyCalls: number; loseReplyResponse: boolean; applyReply: boolean; mutationCalls: number; pushCalls: number; checkCalls: number; losePushResponse: boolean; applyPush: boolean; loseMutationResponse: boolean; applyMutation: boolean; loseCheckResponse: boolean };
+	world: { threadLocation: { line: number | null; startLine: number | null; isOutdated: boolean }; threadBody: string; resolved: boolean; body: string; baseOid: string; baseDriftOnRead: string | null; extraBody: string | null; replyBody: string | null; lateThreadComment: string | null; emptyReviewOnReply: boolean; concurrentBodyOnReply: string | null; failFeedbackAfterReply: boolean; replyCalls: number; loseReplyResponse: boolean; applyReply: boolean; mutationCalls: number; pushCalls: number; checkCalls: number; losePushResponse: boolean; applyPush: boolean; loseMutationResponse: boolean; applyMutation: boolean; loseCheckResponse: boolean };
 	exec: Exec;
 	current: () => CurrentPullRequest;
 	workflow: (ids?: string[]) => PullRequestCommentSweep;
@@ -149,7 +149,7 @@ function fixture(): Fixture {
 	const initial = git(root, "rev-parse", "HEAD");
 	git(root, "remote", "add", "origin", bare);
 	git(root, "push", "origin", `${initial}:refs/heads/feature`);
-	const world = { resolved: false, body: "please fix", baseOid: initial, baseDriftOnRead: null as string | null, extraBody: null as string | null, replyBody: null as string | null, lateThreadComment: null as string | null, emptyReviewOnReply: false, concurrentBodyOnReply: null as string | null, failFeedbackAfterReply: false, replyCalls: 0, loseReplyResponse: false, applyReply: true, mutationCalls: 0, pushCalls: 0, checkCalls: 0, losePushResponse: false, applyPush: true, loseMutationResponse: false, applyMutation: true, loseCheckResponse: false };
+	const world = { threadLocation: { line: 1 as number | null, startLine: null as number | null, isOutdated: false }, threadBody: "thread-1-comment", resolved: false, body: "please fix", baseOid: initial, baseDriftOnRead: null as string | null, extraBody: null as string | null, replyBody: null as string | null, lateThreadComment: null as string | null, emptyReviewOnReply: false, concurrentBodyOnReply: null as string | null, failFeedbackAfterReply: false, replyCalls: 0, loseReplyResponse: false, applyReply: true, mutationCalls: 0, pushCalls: 0, checkCalls: 0, losePushResponse: false, applyPush: true, loseMutationResponse: false, applyMutation: true, loseCheckResponse: false };
 	const exec: Exec = async (command, args, options) => {
 		if (command === "gh" && args[0] === "api" && options.stdin?.includes("addPullRequestReviewThreadReply")) {
 			world.replyCalls += 1;
@@ -181,9 +181,9 @@ function fixture(): Fixture {
 				]),
 				reviews: page([review("review-1"), ...(world.emptyReviewOnReply && world.replyBody !== null
 					? [{ ...review("owner-empty-review", ""), state: "COMMENTED", author: { login: "owner" } }] : [])]),
-				reviewThreads: page([thread("thread-1", world.resolved, [comment("thread-1-comment"),
+				reviewThreads: page([{ ...thread("thread-1", world.resolved, [comment("thread-1-comment", world.threadBody),
 					...(world.lateThreadComment === null ? [] : [comment("thread-1-late", world.lateThreadComment)]),
-					...(world.replyBody === null ? [] : [comment("thread-1-reply", world.replyBody)])])]),
+					...(world.replyBody === null ? [] : [comment("thread-1-reply", world.replyBody)])]), ...world.threadLocation }]),
 			} } } }));
 		}
 		if (command === "git" && args[0] === "push") {
@@ -525,7 +525,7 @@ test("runs exact coverage, guarded publication, fresh resolution, checks, and fi
 	const resolved = await workflow.resolve(refreshed.guard, ["thread-1"]);
 	assert.equal(resolved.phase, "resolved");
 	assert.equal(app.world.mutationCalls, 1);
-	assert.equal(app.world.replyBody, `https://github.com/acme/project/commit/${published.publicationHead}`);
+	assert.equal(app.world.replyBody, published.publicationHead);
 
 	app.world.body = "late edit";
 	await assert.rejects(workflow.finalize(resolved.guard, [{ command: "git", args: ["diff", "--check"] }]), /declared final projection/);
@@ -534,6 +534,32 @@ test("runs exact coverage, guarded publication, fresh resolution, checks, and fi
 		kind: "finalized", pullRequestUrl: "https://github.com/acme/project/pull/42", head: published.publicationHead, checks: 1,
 	});
 	assert.throws(() => readFileSync(recoveryPath, "utf8"), { code: "ENOENT" });
+});
+
+test("refresh resolves moved or outdated review threads but blocks edited child content", async (t) => {
+	for (const scenario of ["moved", "outdated", "edited"] as const) {
+		await t.test(scenario, async (t) => {
+			const app = fixture();
+			t.after(app.cleanup);
+			const workflow = app.workflow();
+			const started = await workflow.start();
+			const recorded = await workflow.record(started.guard, ledger(started), ["file.txt"]);
+			writeFileSync(join(app.root, "file.txt"), "fixed\n");
+			await workflow.commit(recorded.guard, "fix: review");
+			const published = await workflow.publish(recorded.guard);
+			app.world.threadLocation = scenario === "moved"
+				? { line: 12, startLine: 10, isOutdated: false }
+				: { line: null, startLine: null, isOutdated: true };
+			if (scenario === "edited") app.world.threadBody = "new requirement after publication";
+			const refreshed = await workflow.refresh(published.guard);
+			assert.equal(refreshed.plan?.ledger.find(({ id }) => id === "thread-1")?.disposition, "addressed");
+			const resolved = await workflow.resolve(refreshed.guard);
+			assert.equal(app.world.resolved, scenario !== "edited");
+			assert.equal(app.world.replyBody, scenario === "edited" ? null : published.publicationHead);
+			if (scenario === "edited") assert.equal(refreshed.plan?.ledger.find(({ id }) => id === "thread-1-comment")?.disposition, "blocked");
+			await workflow.finalize(resolved.guard, []);
+		});
+	}
 });
 
 test("refresh blocks new feedback while retaining unchanged decisions", async (t) => {
@@ -719,6 +745,78 @@ test("resume rejects another route authority in the same worktree without mutati
 		replies: app.world.replyCalls,
 		checks: app.world.checkCalls,
 	}, { push: 0, thread: 0, replies: 0, checks: 0 });
+});
+
+test("fresh route resumes a scoped manual publication without discarding feedback or replaying a push", async (t) => {
+	const app = fixture();
+	t.after(app.cleanup);
+	const workflow = app.workflow();
+	const started = await workflow.start();
+	const recorded = await workflow.record(started.guard, ledger(started), ["file.txt"]);
+	writeFileSync(join(app.root, "file.txt"), "manually fixed\n");
+	git(app.root, "add", "file.txt");
+	git(app.root, "commit", "-m", "fix: scoped manual publication");
+	git(app.root, "push", "origin", "HEAD:refs/heads/feature");
+	app.world.baseOid = "b".repeat(40); // The base can move before a fresh /pr discovers the publication.
+	const head = git(app.root, "rev-parse", "HEAD");
+	const path = await workflow.recoveryPath();
+	const before = readFileSync(path, "utf8");
+	const fresh = app.workflow(["33333333-3333-4333-8333-333333333333"]);
+	assert.equal(await fresh.recoveryLaunchAction(), "resume");
+	assert.equal(readFileSync(path, "utf8"), before);
+	const resumed = await fresh.resume();
+	assert.equal(resumed.phase, "published");
+	assert.equal(resumed.publicationHead, head);
+	assert.equal(resumed.originalHead, app.initial);
+	assert.equal(resumed.guard.epoch, recorded.guard.epoch + 1);
+	assert.deepEqual(resumed.plan, recorded.plan);
+	assert.equal(app.world.pushCalls, 0);
+	assert.equal(app.world.replyCalls, 0);
+	await assert.rejects(fresh.resolve(resumed.guard), /refresh|ready|projection/);
+	const refreshed = await fresh.refresh(resumed.guard);
+	const resolved = await fresh.resolve(refreshed.guard);
+	assert.equal(app.world.replyBody, head);
+	await fresh.finalize(resolved.guard, []);
+	assert.equal(app.world.pushCalls, 0);
+});
+
+test("external publication recovery preserves dirty, unowned, divergent, or uncertain state", async (t) => {
+	for (const scenario of ["dirty", "unowned", "local-ahead", "divergent", "uncertain-push", "unrecorded"] as const) {
+		await t.test(scenario, async (t) => {
+			const app = fixture();
+			t.after(app.cleanup);
+			const workflow = app.workflow();
+			const started = await workflow.start();
+			const recorded = scenario === "unrecorded" ? started : await workflow.record(started.guard, ledger(started), ["file.txt"]);
+			writeFileSync(join(app.root, "file.txt"), "fixed\n");
+			if (scenario === "unowned") writeFileSync(join(app.root, "unrelated.txt"), "not reviewed\n");
+			if (scenario === "divergent") git(app.root, "checkout", "--orphan", "replacement");
+			git(app.root, "add", ".");
+			git(app.root, "commit", "-m", "fix: external change");
+			if (scenario === "uncertain-push") {
+				app.world.losePushResponse = true;
+				await assert.rejects(workflow.publish(recorded.guard), /push response lost/);
+				writeFileSync(join(app.root, "file.txt"), "another change\n");
+				git(app.root, "commit", "-am", "fix: unrecorded second commit");
+			}
+			git(app.root, "push", "--force", "origin", "HEAD:refs/heads/feature");
+			if (scenario === "dirty") writeFileSync(join(app.root, "file.txt"), "pending\n");
+			if (scenario === "local-ahead") {
+				writeFileSync(join(app.root, "file.txt"), "not pushed\n");
+				git(app.root, "commit", "-am", "fix: local only");
+			}
+			const path = await workflow.recoveryPath();
+			const saved = readFileSync(path, "utf8");
+			const fresh = app.workflow();
+			const blocker = /clean worktree|outside owned paths|HEAD changed|no longer descends|route authority/;
+			await assert.rejects(fresh.recoveryLaunchAction(), blocker);
+			await assert.rejects(fresh.resume(), blocker);
+			assert.equal(readFileSync(path, "utf8"), saved);
+			assert.equal(app.world.replyCalls, 0);
+			assert.equal(app.world.mutationCalls, 0);
+			assert.equal(app.world.pushCalls, scenario === "uncertain-push" ? 1 : 0);
+		});
+	}
 });
 
 test("resume reconciles a lost push response, rotates the run, and never replays it", async (t) => {
@@ -916,7 +1014,7 @@ test("another actor's identical reply cannot satisfy a lost mutation", async (t)
 	app.world.applyReply = false;
 	app.world.loseReplyResponse = true;
 	await assert.rejects(workflow.resolve(refreshed.guard, ["thread-1"]), /reply response lost/);
-	app.world.replyBody = `https://github.com/acme/project/commit/${published.publicationHead}`;
+	app.world.replyBody = published.publicationHead;
 	await assert.rejects(workflow.resume(), /Reply attempt outcome is ambiguous/);
 	assert.equal(app.world.replyCalls, 1);
 	assert.equal(app.world.mutationCalls, 0);

@@ -46,7 +46,7 @@ export interface LaunchRuntimeOptions {
 	context(): ExtensionContext;
 	resolveRoot(cwd: string, context: OperationContext): Promise<string>;
 	preflightHost?(input: { request: ExecuteRequest; cwd: string; root: string }, context: OperationContext): Promise<void>;
-	inspectMain(input: { root: string }, context: OperationContext): Promise<WorkspaceIdentity>;
+	inspectMainBase(input: { root: string }, context: OperationContext): Promise<WorkspaceIdentity>;
 	executionBudget?: () => Omit<EphemeralSubagentExecutionBudget, "startedAt">;
 	now?: () => number;
 	randomToken?: () => string;
@@ -224,7 +224,7 @@ export class RoleLaunchRuntime implements CoordinatorRuntime {
 		if (input.request.tasks.some((task) => task.kind === "changeset")) {
 			await this.options.preflightHost?.({ request: input.request, cwd: input.cwd, root }, context);
 		}
-		const main = await this.options.inspectMain({ root }, context);
+		const main = await this.options.inspectMainBase({ root }, context);
 		const required = new Map<string, Set<ModelClass>>();
 		const addRequired = (role: string, modelClass: ModelClass): void => {
 			const modelClasses = required.get(role) ?? new Set<ModelClass>();
