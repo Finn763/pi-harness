@@ -471,9 +471,9 @@ test("aborted request keeps mixed task evidence distinct in status and widget", 
 	const harness = createHarness({ responseState: state });
 	const result = await executeTool(namedTool(harness, "subagent_status"), { id: "request-one" }, undefined, ctx);
 	assert.deepEqual(widgets.at(-1), [
-		"■ I request-one · request aborted",
 		"! I [I1] unit-one · attention · Worker prompt outcome ambiguous · 012345",
 		"◌ I [R1] unit-two · working · 012345",
+		"■ I request-one · request aborted",
 	]);
 	const { status, tasks, integration } = (result.details as {
 		state: { status: string; tasks: Array<{ taskId: string; status: string }>; integration: { candidates: unknown[] } };
@@ -552,6 +552,23 @@ test("isolated widget caps rows and keeps attention visible", async () => {
 	assert.equal(widgets.at(-1)?.length, 6);
 	assert.match(widgets.at(-1)![0]!, /^! I /);
 	assert.equal(widgets.at(-1)![5], "+2 more · /subagent");
+});
+
+test("attention tasks remain visible when aborted summaries exceed the widget cap", async () => {
+	const widgets: Array<string[] | undefined> = [];
+	const ctx = { cwd: "/repo", hasUI: true,
+		ui: { setWidget: (_key: string, content: WidgetContent) => widgets.push(renderWidget(content)) } } as unknown as ExtensionContext;
+	const harness = createHarness();
+	await executeTool(namedTool(harness, "delegate_task"), EXECUTE_REQUEST, undefined, ctx);
+	for (let index = 0; index < 5; index++) {
+		const state = structuredClone(PRIVATE_STATE);
+		state.request.id = `aborted-${index}`;
+		state.status = "aborted";
+		addWorkspace(state);
+		harness.getStateSaved()(state);
+	}
+	assert.match(widgets.at(-1)![0]!, /^! I /);
+	assert.equal(widgets.at(-1)![5], "+5 more · /subagent");
 });
 
 test("inventory refresh restores and clears workspace widget rows from saved state", async () => {

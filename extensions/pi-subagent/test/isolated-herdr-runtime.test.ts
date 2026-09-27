@@ -1594,6 +1594,8 @@ test("worker prompts preserve ordered upstream task data and reject oversized fu
 		'{"command":"pnpm","args":["test"]}',
 		"",
 		"Work only in the exact worktree above. Commit the complete result and leave that worktree clean.",
+		"",
+		`Turn identity: ${attempt.correlationToken}:${attempt.prompts.length}`,
 	].join("\n");
 	script.push(
 		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
@@ -1807,7 +1809,7 @@ test("finished worker without a commit reports blocked instead of waiting for a 
 	const { attempt } = await fullAttempt(fixture, host, script);
 	const lease = attempt.allocations.find((item): item is AgentAllocationIntent => item.kind === "agent")!.leasePath;
 	await privateLease(lease);
-	const prompt = buildChangesetTaskPrompt({ goal: GOAL, contexts: [], task, kind: "initial", worktreeCwd: fixture.worktree });
+	const prompt = `${buildChangesetTaskPrompt({ goal: GOAL, contexts: [], task, kind: "initial", worktreeCwd: fixture.worktree })}\n\nTurn identity: ${attempt.correlationToken}:${attempt.prompts.length}`;
 	await writeFile(`${lease}.session.jsonl`, [
 		JSON.stringify({ type: "message", id: "user-one", parentId: null, message: { role: "user", content: [{ type: "text", text: prompt }] } }),
 		JSON.stringify({ type: "message", id: "answer-one", parentId: "user-one", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "No safe change was made." }] } }),
@@ -1820,6 +1822,78 @@ test("finished worker without a commit reports blocked instead of waiting for a 
 	const result = await host.runWorker({ goal: GOAL, contexts: [], task, attempt, workerId: AGENT_NAME, kind: "initial", preCandidate: baseIdentity() }, context());
 	assert.equal(result.outcome, "blocked");
 	assert.deepEqual(delays, []);
+	script.done();
+});
+
+test("an exact failed terminal turn without a commit reports attention after a stalled prompt", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	const host = runtime(fixture, script, async () => baseIdentity(), {
+		inspectInFlightTaskCandidate: async () => ({ candidate: baseIdentity(), clean: true, valid: true }),
+	});
+	const { attempt } = await fullAttempt(fixture, host, script);
+	const lease = attempt.allocations.find((item): item is AgentAllocationIntent => item.kind === "agent")!.leasePath;
+	await privateLease(lease);
+	const prompt = `${buildChangesetTaskPrompt({ goal: GOAL, contexts: [], task, kind: "initial", worktreeCwd: fixture.worktree })}\n\nTurn identity: ${attempt.correlationToken}:${attempt.prompts.length}`;
+	await writeFile(`${lease}.session.jsonl`, [
+		JSON.stringify({ type: "message", id: "user-one", parentId: null, message: { role: "user", content: [{ type: "text", text: prompt }] } }),
+		JSON.stringify({ type: "message", id: "answer-one", parentId: "user-one", message: { role: "assistant", stopReason: "error", content: [{ type: "text", text: "Provider failed." }] } }),
+	].join("\n") + "\n", { mode: 0o600 });
+	script.push(
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: () => {}, result: failure("agent_prompt_stalled") },
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("done", true, { cwd: fixture.worktree }) }) },
+	);
+	const result = await host.runWorker({ goal: GOAL, contexts: [], task, attempt, workerId: AGENT_NAME, kind: "initial", preCandidate: baseIdentity() }, context());
+	assert.equal(result.outcome, "blocked");
+	script.done();
+});
+
+test("a repeated instruction cannot reuse an earlier finished turn as session proof", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	const controller = new AbortController();
+	const host = runtime(fixture, script, async () => baseIdentity(), {
+		inspectInFlightTaskCandidate: async () => ({ candidate: baseIdentity(), clean: true, valid: true }),
+		delay: async () => { controller.abort(); throw new Error("Observation stopped"); },
+	});
+	const { attempt } = await fullAttempt(fixture, host, script);
+	const lease = attempt.allocations.find((item): item is AgentAllocationIntent => item.kind === "agent")!.leasePath;
+	await privateLease(lease);
+	const oldPrompt = `${buildChangesetTaskPrompt({ goal: GOAL, contexts: [], task, kind: "initial", worktreeCwd: fixture.worktree })}\n\nTurn identity: ${attempt.correlationToken}:0`;
+	await writeFile(`${lease}.session.jsonl`, [
+		JSON.stringify({ type: "message", id: "user-one", parentId: null, message: { role: "user", content: [{ type: "text", text: oldPrompt }] } }),
+		JSON.stringify({ type: "message", id: "answer-one", parentId: "user-one", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "No safe change was made." }] } }),
+	].join("\n") + "\n", { mode: 0o600 });
+	attempt.prompts.push({ kind: "initial", status: "settled", preCandidate: baseIdentity(), at: 1 });
+	script.push(
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: () => {}, result: failure("agent_prompt_stalled") },
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
+	);
+	const result = await host.runWorker({ goal: GOAL, contexts: [], task, attempt, workerId: AGENT_NAME, kind: "initial", preCandidate: baseIdentity() }, { signal: controller.signal });
+	assert.equal(result.outcome, "interrupted");
+	script.done();
+});
+
+test("a replaced worker session FIFO fails closed without blocking the productive observer", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	const host = runtime(fixture, script, async () => baseIdentity(), {
+		inspectInFlightTaskCandidate: async () => ({ candidate: baseIdentity(), clean: true, valid: true }),
+	});
+	const { attempt } = await fullAttempt(fixture, host, script);
+	const lease = attempt.allocations.find((item): item is AgentAllocationIntent => item.kind === "agent")!.leasePath;
+	await privateLease(lease);
+	execFileSync("mkfifo", [`${lease}.session.jsonl`]);
+	script.push(
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_prompted", agent: agentInfo("working", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
+	);
+	const result = await host.runWorker({ goal: GOAL, contexts: [], task, attempt, workerId: AGENT_NAME, kind: "initial", preCandidate: baseIdentity() }, context());
+	assert.equal(result.outcome, "unknown");
+	assert.match(result.diagnostic, /not private, regular, or bounded/);
 	script.done();
 });
 

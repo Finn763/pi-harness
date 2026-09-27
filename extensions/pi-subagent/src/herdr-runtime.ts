@@ -49,7 +49,7 @@ import {
 } from "./runner.ts";
 import { runProcess as defaultRunProcess } from "./process.ts";
 import { EXECUTION_BUDGET_ENV, type EphemeralSubagentExecutionBudget } from "./ephemeral.ts";
-import { exactDirectAnswer } from "./direct-herdr.ts";
+import { exactDirectTerminalTurn } from "./direct-herdr.ts";
 
 const MIN_HERDR_VERSION = [0, 9, 0] as const;
 const MIN_HERDR_PROTOCOL = 22;
@@ -593,7 +593,7 @@ export class HerdrHostRuntime implements HostRuntime {
 		let text: string;
 		try {
 			if (input.task.kind !== "changeset") throw new Error("Herdr assignment requires a changeset task.");
-			text = buildChangesetTaskPrompt({
+			text = `${buildChangesetTaskPrompt({
 				goal: input.goal,
 				contexts: input.contexts,
 				task: input.task,
@@ -601,7 +601,8 @@ export class HerdrHostRuntime implements HostRuntime {
 				worktreeCwd: allocation.worktreeCwd,
 				...(input.failure ? { failure: input.failure } : {}),
 				...(input.instruction ? { instruction: input.instruction } : {}),
-			});
+			})}\n\nTurn identity: ${input.attempt.correlationToken}:${input.attempt.prompts.length}`;
+			if (Buffer.byteLength(text, "utf8") > 96 * 1024) throw new Error("Worker assignment exceeds 98304 bytes.");
 		} catch (error) {
 			return { outcome: "not_prompted", diagnostic: `Worker assignment was not submitted: ${safeText(error)}` };
 		}
@@ -1246,7 +1247,7 @@ export class HerdrHostRuntime implements HostRuntime {
 
 	private async privateSessionFile(path: string): Promise<string | undefined> {
 		let file;
-		try { file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+		try { file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
 		catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 			throw error;
@@ -1266,9 +1267,8 @@ export class HerdrHostRuntime implements HostRuntime {
 		await this.assertPrivateLeaseDirectories(allocation.leasePath, false);
 		const session = await this.privateSessionFile(path);
 		if (session === undefined) return false;
-		try { exactDirectAnswer(session, prompt, SESSION_LIMIT); return true; }
+		try { return exactDirectTerminalTurn(session, prompt); }
 		catch (error) {
-			if (error instanceof Error && error.message === "Pi did not persist an exact successful final answer for this prompt.") return false;
 			if (error instanceof SyntaxError && !session.endsWith("\n")) return false; // Pi may still be writing the last JSONL entry.
 			throw error;
 		}

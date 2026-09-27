@@ -34,8 +34,9 @@ test("direct admission trusts configured extensions and MCP servers but rejects 
 	assert.equal(roleCanWrite({ ...role, tools: ["read", "bash"] }), true);
 });
 
-function loadRoleTools(processLease: string | undefined): { events: string[]; toolCall?: ToolCallHandler } {
+function loadRoleTools(processLease: string | undefined): { events: string[]; toolCall?: ToolCallHandler; childUmask: number } {
 	const previousLease = process.env[PI_SUBAGENT_PROCESS_LEASE];
+	const previousUmask = process.umask();
 	if (processLease === undefined) delete process.env[PI_SUBAGENT_PROCESS_LEASE];
 	else process.env[PI_SUBAGENT_PROCESS_LEASE] = processLease;
 	const events: string[] = [];
@@ -49,8 +50,9 @@ function loadRoleTools(processLease: string | undefined): { events: string[]; to
 				if (event === "tool_call") toolCall = handler;
 			},
 		} as unknown as ExtensionAPI);
-		return { events, toolCall };
+		return { events, toolCall, childUmask: process.umask() };
 	} finally {
+		process.umask(previousUmask);
 		if (previousLease === undefined) delete process.env[PI_SUBAGENT_PROCESS_LEASE];
 		else process.env[PI_SUBAGENT_PROCESS_LEASE] = previousLease;
 	}
@@ -81,6 +83,7 @@ for (const entry of readdirSync("/dev/fd")) {
 throw new Error("process lease descriptor was not inherited");
 `);
 	const extension = loadRoleTools(lease);
+	assert.equal(extension.childUmask, 0o077);
 	assert.equal(extension.events.filter((event) => event === "tool_call").length, 1);
 	assert.ok(extension.toolCall);
 	const bash = {

@@ -144,8 +144,8 @@ export function workspaceWidgetLines(state: RunState): string[] | undefined {
 
 function renderWorkspaceWidget(ctx: ExtensionContext, rowsByRequest: Map<string, string[]>): void {
 	if (!ctx.hasUI) return;
-	const rowOrder = (row: string) => row.endsWith(" · request aborted") ? -1
-		: row.startsWith("!") ? 0 : row.startsWith("◌") ? 1 : 2;
+	const rowOrder = (row: string) => row.startsWith("!") ? 0 : row.startsWith("◌") ? 1
+		: row.endsWith(" · request aborted") ? 2 : 3;
 	const allRows = [...rowsByRequest.values()].flat().sort((a, b) => rowOrder(a) - rowOrder(b));
 	const shown = allRows.length > MAX_WORKSPACE_WIDGET_LINES
 		? [...allRows.slice(0, MAX_WORKSPACE_WIDGET_LINES - 1), `+${allRows.length - MAX_WORKSPACE_WIDGET_LINES + 1} more · /subagent`]
